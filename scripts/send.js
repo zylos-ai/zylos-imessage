@@ -1,70 +1,140 @@
 #!/usr/bin/env node
 /**
- * C4 Communication Bridge Interface for zylos-imessage
- *
- * This file provides the standard interface for Claude to send messages
- * through this communication component.
+ * C4 outbound interface for zylos-imessage.
  *
  * Usage:
  *   node scripts/send.js <endpoint_id> "message text"
- *   node scripts/send.js <endpoint_id> "[MEDIA:image]/path/to/image.png"
- *   node scripts/send.js <endpoint_id> "[MEDIA:file]/path/to/document.pdf"
+ *   echo "message text" | node scripts/send.js <endpoint_id>
+ *
+ * This process does not talk to Photon. It hands the message to the running
+ * daemon over a unix socket, which owns the SDK connection (see src/lib/ipc.js
+ * for why). If the daemon is down, the send fails loudly rather than silently
+ * dropping the reply.
  *
  * Exit codes:
- *   0 - Success
+ *   0 - Success (or an explicit [SKIP])
  *   1 - Error (message printed to stderr)
  */
 
-// Parse arguments
+import { loadConfig } from '../src/lib/config.js';
+import { parseEndpoint } from '../src/lib/endpoint.js';
+import { prepareOutbound } from '../src/lib/format.js';
+import { ipcRequest, SOCKET_PATH } from '../src/lib/ipc.js';
+
 const args = process.argv.slice(2);
-if (args.length < 2) {
-  console.error('Usage: send.js <endpoint_id> <message>');
-  console.error('       send.js <endpoint_id> "[MEDIA:image]/path/to/image.png"');
-  console.error('       send.js <endpoint_id> "[MEDIA:file]/path/to/file.pdf"');
+if (args.length < 1) {
+  console.error('Usage: send.js <endpoint_id> [message]');
+  console.error('       echo "message" | send.js <endpoint_id>');
   process.exit(1);
 }
 
-const endpointId = args[0];
-const message = args.slice(1).join(' ');
+const endpointRaw = args[0];
+const cliMessage = args.slice(1).join(' ');
 
-// Parse media prefix
-const mediaMatch = message.match(/^\[MEDIA:(\w+)\](.+)$/);
-
-async function send() {
-  try {
-    if (mediaMatch) {
-      const [, mediaType, mediaPath] = mediaMatch;
-      await sendMedia(endpointId, mediaType, mediaPath);
-    } else {
-      await sendText(endpointId, message);
+function readStdin(timeoutMs) {
+  return new Promise((resolve) => {
+    if (process.stdin.isTTY) {
+      resolve('');
+      return;
     }
-    process.exit(0);
-  } catch (err) {
-    console.error(`Error: ${err.message}`);
+    let data = '';
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      process.stdin.pause();
+      resolve(data);
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', chunk => { data += chunk; });
+    process.stdin.on('end', finish);
+    process.stdin.on('error', finish);
+  });
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+/** Machine-parseable delivery receipt for C4 correlation. */
+function emitReceipt({ status, messageIds = [], chunks, error }, { spaceId, correlationId }) {
+  const receipt = { status, type: 'text', spaceId, correlationId, messageIds, ts: Date.now() };
+  if (chunks !== undefined) receipt.chunks = chunks;
+  if (error) receipt.error = error;
+  console.log('RECEIPT ' + JSON.stringify(receipt));
+}
+
+async function main() {
+  const parsed = parseEndpoint(endpointRaw);
+  const spaceId = parsed.spaceId;
+  const correlationId = parsed.req || null;
+
+  if (!spaceId) {
+    console.error('Error: invalid endpoint (missing space id)');
     process.exit(1);
   }
+
+  const config = loadConfig();
+  const stdinData = await readStdin(cliMessage ? 100 : 5000);
+  const message = stdinData.trim() || cliMessage;
+
+  if (!message) {
+    console.error('Error: no message provided');
+    process.exit(1);
+  }
+
+  if (message.trim() === '[SKIP]') {
+    emitReceipt({ status: 'skipped' }, { spaceId, correlationId });
+    console.log('Skipped (smart mode)');
+    return;
+  }
+
+  if (message.startsWith('[MEDIA:')) {
+    // Attachments go through a different Content type in the SDK; not wired up
+    // yet. Fail explicitly instead of posting the raw marker to the chat.
+    const error = 'media sending is not implemented for iMessage yet';
+    emitReceipt({ status: 'failed', error }, { spaceId, correlationId });
+    console.error(`Error: ${error}`);
+    process.exit(1);
+  }
+
+  const chunks = prepareOutbound(message, config.message || {});
+  const timeoutMs = config.ipc?.requestTimeoutMs || 30000;
+  const chunkDelayMs = config.message?.chunkDelayMs ?? 600;
+  const messageIds = [];
+
+  try {
+    for (let i = 0; i < chunks.length; i++) {
+      const response = await ipcRequest(
+        { type: 'send', spaceId, text: chunks[i] },
+        { socketPath: SOCKET_PATH, timeoutMs }
+      );
+      if (!response?.ok) {
+        throw new Error(response?.error || 'daemon rejected the send');
+      }
+      if (response.messageId) messageIds.push(response.messageId);
+      console.log(`Sent chunk ${i + 1}/${chunks.length}`);
+      if (i < chunks.length - 1) await sleep(chunkDelayMs);
+    }
+  } catch (err) {
+    const error = err?.message || String(err);
+    // Report how many chunks did land — a partial send is not a no-op, and
+    // whoever reads this needs to know before retrying.
+    emitReceipt(
+      { status: 'failed', messageIds, chunks: chunks.length, error },
+      { spaceId, correlationId }
+    );
+    console.error(`Error: ${error}`);
+    process.exit(1);
+  }
+
+  emitReceipt({ status: 'sent', messageIds, chunks: chunks.length }, { spaceId, correlationId });
+  console.log('Message sent successfully');
 }
 
-/**
- * Send a text message
- */
-async function sendText(endpoint, text) {
-  // TODO: Implement text sending logic
-  // Example:
-  // const response = await fetch(`https://api.example.com/send`, {
-  //   method: 'POST',
-  //   headers: { 'Content-Type': 'application/json' },
-  //   body: JSON.stringify({ chat_id: endpoint, text }),
-  // });
-  throw new Error('sendText not implemented');
-}
-
-/**
- * Send media (image, file, video, etc.)
- */
-async function sendMedia(endpoint, type, filePath) {
-  // TODO: Implement media sending logic
-  throw new Error('sendMedia not implemented');
-}
-
-send();
+main().catch((err) => {
+  console.error(`Error: ${err?.message || err}`);
+  process.exit(1);
+});

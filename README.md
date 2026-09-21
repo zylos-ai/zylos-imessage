@@ -19,13 +19,30 @@
 
 ---
 
-> [!IMPORTANT]
-> This repository is an initial component scaffold. It does not yet connect to
-> Apple's Messages app or provide working inbound or outbound iMessage delivery.
+Send and receive iMessages from a Zylos agent, through the
+[Photon](https://photon.ai) cloud service (Spectrum SDK). Photon owns the
+Apple-side integration, so **no Mac and no Apple ID are required** — the phone
+number belongs to Photon.
 
-- **Zylos component lifecycle** — generated install, configure, and upgrade hooks
-- **Persistent configuration** — component-owned data directory and hot reload scaffold
-- **Communication interface** — outbound command shape ready for a future transport
+> [!IMPORTANT]
+> **Verification status.** Delivery to and from a **real device** is verified
+> (2026-09-21): an iMessage sent from an iPhone reached the daemon and bound the
+> owner, and a reply sent with `scripts/send.js` was accepted by Photon and
+> arrived on the device. The pipeline is additionally covered by 112 module
+> tests and 9 integration tests that spawn the real daemon against a stubbed
+> SDK.
+>
+> One gap remains: inbound message *content* only reaches C4 once the component
+> is installed as a channel. Run from a working copy, C4 rejects the delivery
+> with `invalid channel: directory not found (imessage)` — the daemon sees the
+> message, but nothing downstream does.
+
+- **Inbound** — Photon → filters (direction, dedupe, authorization, rate limit,
+  content) → C4
+- **Outbound** — C4 → `scripts/send.js` → unix socket → daemon → Photon
+- **Access control** — owner binding, DM policy, group policy (off by default)
+- **Secret handling** — config forced to 0600; env-sourced credentials are never
+  copied to disk
 
 ## Install
 
@@ -41,25 +58,82 @@ git clone https://github.com/zylos-ai/zylos-imessage.git imessage
 cd imessage && npm install
 ```
 
+You will need a Photon project that has completed its **iMessage sync** step.
+Until it has, the service reports `imessageSynced: false`, no number is
+attached, and nothing can be sent or received.
+
 ## Configuration
 
-Edit `~/zylos/components/imessage/config.json`:
+Credentials can live in the environment (preferred — one secret in one place):
+
+```bash
+# ~/zylos/.env
+IMESSAGE_PROJECT_ID=...
+IMESSAGE_PROJECT_SECRET=...
+```
+
+Photon's own docs call these `SPECTRUM_PROJECT_ID` / `SPECTRUM_PROJECT_SECRET`;
+those names are accepted as a fallback so a copy-pasted snippet works.
+
+Or in `~/zylos/components/imessage/config.json` (kept at 0600 — it can hold the
+project secret):
 
 ```json
 {
-  "enabled": true
+  "enabled": true,
+  "dmPolicy": "owner",
+  "groupPolicy": "disabled",
+  "message": { "maxLength": 2000 },
+  "rateLimit": { "windowMs": 60000, "max": 60 }
 }
 ```
 
+See [SKILL.md](./SKILL.md) for the full option table.
+
 ## Usage
 
-There is no operational usage yet. The transport, supported host platform,
-permissions, endpoint identity, and C4 message flow still need to be designed
-and implemented.
+On the free tier the number is **shared**, and a shared number cannot open a
+conversation. The human sends the first message to the Photon-assigned number;
+after that, replies flow both ways.
+
+Outbound:
+
+```bash
+node scripts/send.js "<endpoint_id>" "message text"
+echo "message text" | node scripts/send.js "<endpoint_id>"
+```
+
+Attachments are not supported; an outbound `[MEDIA:*]` marker is rejected with
+an explicit error rather than delivered as literal text.
+
+## Security
+
+- **The owner is never inferred from inbound traffic.** The number is shared,
+  so "messaged first" proves nothing. Set `owner.user_id` in `config.json`
+  before first start — until it is set, every DM is dropped. Alternatively set
+  `pairing.code` (>= 8 chars, optional `expiresAt`, attempt-capped, single-use)
+  and bind by sending that code from the owner's device; the code itself is
+  never forwarded to C4.
+- **Message bodies, contact names and full phone numbers are never written to
+  the log.** Sender ids are masked to their last four characters. The daemon's
+  stdout goes to pm2's `out.log`, which has no retention policy.
+- Group chat is disabled by default; the free shared number has no group
+  support.
+- `config.json` is tightened to 0600 at startup if it has been loosened.
+
+## Development
+
+```bash
+npm test     # 121 tests, node:test, no network required
+             # 112 module tests + 9 integration tests that spawn src/index.js
+```
+
+The Photon SDK is lazily imported behind a test seam, so the full suite runs
+without the SDK installed.
 
 ## Design Notes
 
-Development-time architecture notes live in [docs/DESIGN.md](./docs/DESIGN.md).
+Architecture notes live in [docs/DESIGN.md](./docs/DESIGN.md).
 
 ## Built by OpenMax
 
