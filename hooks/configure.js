@@ -6,7 +6,15 @@
  * Receives a JSON object on stdin and writes component-owned config.json.
  *
  * Example stdin:
- *   { "IMESSAGE_API_KEY": "secret" }
+ *   { "IMESSAGE_PROJECT_ID": "...", "IMESSAGE_PROJECT_SECRET": "..." }
+ *
+ * The collected names are mapped through an explicit allowlist rather than
+ * derived from the env name: src/lib/config.js reads camelCase keys, so a
+ * mechanical prefix-strip + lowercase would write `project_id` and the
+ * daemon would silently never see the credential.
+ *
+ * config.json can hold the project secret, so it is written 0600 inside a
+ * 0700 data dir, matching what src/lib/config.js expects and self-heals to.
  */
 
 import fs from 'node:fs';
@@ -15,7 +23,13 @@ import path from 'node:path';
 const HOME = process.env.HOME;
 const DATA_DIR = path.join(HOME, 'zylos/components/imessage');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
-const COMPONENT_PREFIX = 'IMESSAGE_';
+
+const KEY_MAP = {
+  IMESSAGE_PROJECT_ID: 'projectId',
+  IMESSAGE_PROJECT_SECRET: 'projectSecret',
+  IMESSAGE_DM_POLICY: 'dmPolicy',
+  IMESSAGE_LOG_LEVEL: 'logLevel'
+};
 
 const DEFAULT_CONFIG = {
   enabled: true
@@ -41,16 +55,18 @@ function readJsonFile(filePath, fallback) {
 }
 
 function writeJsonFile(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // mkdirSync's mode only applies when it actually creates the directory, and
+  // zylos usually creates the data dir first. Tighten it either way.
+  try { fs.chmodSync(dir, 0o700); } catch {}
   const tmpPath = `${filePath}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify(value, null, 2) + '\n');
+  fs.writeFileSync(tmpPath, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+  // writeFileSync's mode is ignored when the temp file already exists, so set
+  // it explicitly before the rename publishes the contents.
+  fs.chmodSync(tmpPath, 0o600);
   fs.renameSync(tmpPath, filePath);
-}
-
-function configKeyFromRequiredName(name) {
-  return name
-    .replace(new RegExp(`^${COMPONENT_PREFIX}`), '')
-    .toLowerCase();
+  fs.chmodSync(filePath, 0o600);
 }
 
 try {
@@ -65,13 +81,23 @@ try {
   }
 
   const config = readJsonFile(CONFIG_PATH, DEFAULT_CONFIG);
+  const applied = [];
+  const ignored = [];
   for (const [name, value] of Object.entries(collected)) {
+    // Empty is not an error: credentials may already be in the environment,
+    // in which case the installer legitimately collects nothing for them.
     if (value === undefined || value === null || value === '') continue;
-    config[configKeyFromRequiredName(name)] = value;
+    const key = KEY_MAP[name];
+    if (!key) { ignored.push(name); continue; }
+    config[key] = value;
+    applied.push(key);
   }
 
   writeJsonFile(CONFIG_PATH, config);
-  console.log(`[configure] Wrote config to ${CONFIG_PATH}`);
+  console.log(`[configure] Wrote config to ${CONFIG_PATH} (${applied.length ? applied.join(', ') : 'no new values'})`);
+  if (ignored.length) {
+    console.warn(`[configure] Ignored unrecognized key(s): ${ignored.join(', ')}`);
+  }
 } catch (err) {
   console.error(`[configure] ${err.message}`);
   process.exit(1);
