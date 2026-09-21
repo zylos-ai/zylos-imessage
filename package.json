@@ -1,0 +1,30 @@
+{
+  "name": "zylos-imessage",
+  "version": "0.1.0",
+  "description": "iMessage communication channel for Zylos agents",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "homepage": "https://github.com/zylos-ai/zylos-imessage#readme",
+  "bugs": {
+    "url": "https://github.com/zylos-ai/zylos-imessage/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zylos-ai/zylos-imessage.git"
+  },
+  "keywords": [
+    "zylos",
+    "imessage",
+    "agent"
+  ],
+  "author": "Zylos AI",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {}
+}
