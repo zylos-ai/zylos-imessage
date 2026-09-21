@@ -30,8 +30,8 @@ test('describeNonText labels unsupported content and stays quiet for text', () =
 });
 
 test('describeSpace normalises id, type and phone', () => {
-  assert.deepEqual(describeSpace({ id: 42, type: 'group', phone: 6584119781 }), {
-    id: '42', type: 'group', phone: '6584119781'
+  assert.deepEqual(describeSpace({ id: 42, type: 'group', phone: 15555550142 }), {
+    id: '42', type: 'group', phone: '15555550142'
   });
   // Anything that is not explicitly a group is treated as a DM.
   assert.equal(describeSpace({ id: 'x' }).type, 'dm');
@@ -39,8 +39,8 @@ test('describeSpace normalises id, type and phone', () => {
 });
 
 test('describeSender falls back to the space phone when there is no sender', () => {
-  assert.deepEqual(describeSender({}, { phone: '+6584119781' }), {
-    id: '+6584119781', name: null
+  assert.deepEqual(describeSender({}, { phone: '+15555550142' }), {
+    id: '+15555550142', name: null
   });
   assert.deepEqual(describeSender({ sender: { id: 'u1', name: 'Bobo' } }, {}), {
     id: 'u1', name: 'Bobo'

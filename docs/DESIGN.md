@@ -236,17 +236,26 @@ that decides this: ids are masked to their last four characters
 (`+15555550100` → `***0100`), names are dropped, and endpoint ids are masked
 component-wise because real space ids embed the number (`any;-;+1555...`).
 
-Two leaks were fixed here:
+Three leaks were fixed here:
 
 - `c4.js` logged the first 60 characters of every delivered body.
 - More seriously, the same file logged `error.message` on a delivery failure.
   `execFile` formats that as `Command failed: <file> <args...>`, and our argv
   ends with `--content <the entire message body>` — so any C4 transport error
-  wrote the **whole** message to disk. `sanitizeExecError()` truncates at
-  `--content`.
+  wrote the **whole** message to disk.
+- The first fix for that truncated the command line at `--content`, which
+  dropped the body but kept the head — and the head still carried
+  `--endpoint <space id>`, i.e. the full phone number, on both the first-failure
+  and the after-retry path. Trimming a command line is the wrong shape: every
+  new flag is another way to leak. `describeExecFailure()` therefore derives
+  nothing from the command line, stdout or stderr. It reports only the error
+  class, exit status and signal; the destination is logged separately through
+  `redactEndpoint()`.
 
 An integration test asserts that no body, contact name or full number appears
-in the daemon's output across the delivery, duplicate and rejection paths.
+in the daemon's output across the delivery, duplicate and rejection paths, and
+unit tests drive a real `execFile` failure — with the real argv, via a stub
+child that exits 1 — to assert the same of both failure paths.
 
 `spaces.json` (0600) does retain contact ids and names. That is a functional
 registry rather than a log — the daemon needs it to describe known

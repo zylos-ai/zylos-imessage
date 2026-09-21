@@ -24,7 +24,14 @@ Addresses the five findings from the independent review of PR #1.
   `execFile`'s failure message embeds the full command line, whose last
   argument is `--content <entire body>`, so any C4 transport error wrote the
   complete message to `out.log`.
+- **Delivery-failure logs no longer echo the command line at all.** The first
+  fix above truncated it at `--content`, which still left
+  `--endpoint <space id>` — and real Photon space ids embed the phone number —
+  in both the first-failure and after-retry log lines. `describeExecFailure()`
+  now reports only the error class, exit status and signal, with the
+  destination logged separately and masked.
 - `spaces.json` is now chmod'ed after write, not only on create.
+- Test fixtures use documentation-range numbers (`+1555555xxxx`) only.
 
 ### Fixed
 - Config hot reload survives atomic replacement. The watcher followed the
@@ -40,6 +47,11 @@ Addresses the five findings from the independent review of PR #1.
   Covers stranger rejection, no-owner refusal, pairing, outbound-echo
   suppression, dropped-stream and failed-connect recovery, SIGTERM cleanup,
   and a no-PII-in-logs assertion. Verified to fail against the pre-fix commit.
+- 3 tests covering the delivery-failure log paths. Two drive a real `execFile`
+  failure — the real argv, against a stub child that exits 1 — and assert that
+  neither the first-failure nor the after-retry line contains the number, the
+  body, or the command line. Verified to fail against the pre-fix commit.
+  Suite total: 124.
 
 ### Documentation
 - Corrected the dependency assessment. 2.11.0 is **past** the fix line for

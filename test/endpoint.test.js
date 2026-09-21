@@ -42,7 +42,7 @@ test('safeId escapes only the separator and the escape character', () => {
   assert.equal(safeId('100%'), '100%25');
   // Nothing else is touched: ids are keys, and a lossy transform would make
   // them unusable for space lookup. Values never reach a shell (execFile).
-  assert.equal(safeId('+6584119781'), '+6584119781');
+  assert.equal(safeId('+15555550142'), '+15555550142');
   assert.equal(safeId('user@example.com'), 'user@example.com');
   assert.equal(safeId('any;-;+15555550100'), 'any;-;+15555550100');
 });

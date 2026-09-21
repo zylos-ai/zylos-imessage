@@ -19,17 +19,27 @@ export const C4_RECEIVE = path.join(
 const EXEC_OPTS = { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 };
 
 /**
- * execFile's failure message is `Command failed: <file> <args...>`, and our
- * args end with `--content <the entire message body>`. Logging it raw would
- * put the full body in out.log — worse than the 60-char excerpt this file
- * used to print. Everything from `--content` on is dropped.
+ * Describe a failed exec without quoting anything it was given.
+ *
+ * execFile's error carries the whole command line in `.message` (and `.cmd`),
+ * and our args are `--endpoint <space id> ... --content <the entire body>`.
+ * Both are personal data: real Photon space ids embed the phone number
+ * (`any;-;+1555...`), so trimming from `--content` onwards — which is what
+ * this function used to do — still left the number in the head. Trimming the
+ * command line at all is the wrong shape: every new flag is a new way to leak.
+ * So nothing derived from the command line, stdout or stderr is used here.
+ * What is left is the error class, the exit status and the signal; the
+ * destination is logged separately and masked by redactEndpoint().
  */
-export function sanitizeExecError(error) {
-  const message = error?.message ? String(error.message) : 'unknown error';
-  const cut = message.indexOf('--content');
-  const head = cut === -1 ? message : `${message.slice(0, cut)}--content <redacted>`;
-  // stderr is appended after the command line; keep its tail, minus any body.
-  return head.split('\n')[0].trim();
+export function describeExecFailure(error) {
+  if (!error) return 'unknown error';
+  const parts = [`name=${String(error.name || 'Error')}`];
+  // For a non-zero exit `code` is the exit status; for a spawn failure it is
+  // an errno string (ENOENT, EACCES). Neither can contain caller data.
+  if (error.code !== undefined && error.code !== null) parts.push(`code=${String(error.code)}`);
+  if (error.signal) parts.push(`signal=${String(error.signal)}`);
+  if (error.killed) parts.push('killed=true');
+  return parts.join(' ');
 }
 
 export function parseC4Response(stdout) {
@@ -74,7 +84,7 @@ export function createC4Sender({ isStopped = () => false, retryTimers = new Set(
       }
 
       if (isStopped()) return;
-      console.warn(`[imessage] C4 delivery failed, retrying in ${retryDelayMs}ms: ${sanitizeExecError(error)}`);
+      console.warn(`[imessage] C4 delivery to ${redactEndpoint(endpoint)} failed (${describeExecFailure(error)}), retrying in ${retryDelayMs}ms`);
 
       const timer = setTimeout(() => {
         retryTimers.delete(timer);
@@ -86,7 +96,7 @@ export function createC4Sender({ isStopped = () => false, retryTimers = new Set(
             if (onReject) onReject(retryResponse.error?.message || 'rejected');
             return;
           }
-          console.error(`[imessage] C4 delivery failed after retry: ${sanitizeExecError(retryError)}`);
+          console.error(`[imessage] C4 delivery to ${redactEndpoint(endpoint)} failed after retry (${describeExecFailure(retryError)})`);
           if (onFail) onFail(retryError);
         });
       }, retryDelayMs);
