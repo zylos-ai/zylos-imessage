@@ -1,6 +1,6 @@
 {
   "name": "zylos-imessage",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "iMessage communication channel for Zylos agents",
   "type": "module",
   "main": "src/index.js",

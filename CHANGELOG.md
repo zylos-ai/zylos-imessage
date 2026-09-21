@@ -5,9 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-09-21
 
-Addresses the five findings from the independent review of PR #1.
+Addresses the findings from two rounds of independent review of PR #1: five in
+the first round, one more — a privacy blocker — in the second.
 
 ### Security
 - **Breaking: the owner is no longer bound trust-on-first-use.** Previously the
@@ -63,6 +64,40 @@ Addresses the five findings from the independent review of PR #1.
   now stated rather than generalized into an unqualified "not reachable".
 - Removed the claim of end-to-end coverage the suite did not have, and
   reconciled the contradictory real-device / inbound-content statements.
+
+### Upgrade Notes
+
+```bash
+zylos upgrade imessage
+```
+
+**Breaking — read before upgrading a running install.** The owner is no longer
+bound by trust-on-first-use. After this upgrade a deployment with no
+`owner.user_id` in `config.json` drops **every** inbound DM, silently from the
+sender's point of view. Nothing in the message flow will tell you this is
+happening; the daemon warns once at startup.
+
+Set the owner before restarting:
+
+```json
+{ "owner": { "user_id": "+15555550100" } }
+```
+
+Or, to bind it interactively, add a pairing code and have the owner send
+exactly that string as their first message:
+
+```json
+{ "pairing": { "code": "a-shared-secret-at-least-8-chars" } }
+```
+
+The code is single-use, attempt-capped, compared in constant time, optionally
+expiring via `expiresAt`, and the message carrying it is consumed rather than
+forwarded to C4.
+
+Logs no longer contain message bodies, contact names, or full phone numbers, so
+any log-scraping or alerting built against 0.2.0 output needs rechecking: ids
+now appear masked (`***0100`) and delivery failures report only an error class
+and exit status.
 
 ## [0.2.0] - 2026-09-21
 
