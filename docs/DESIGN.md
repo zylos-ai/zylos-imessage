@@ -1,6 +1,6 @@
 # zylos-imessage Design Document
 
-**Version**: 0.2.0
+**Version**: 0.3.0
 **Date**: 2026-09-21
 **Author**: Zylos Team
 **Repository**: https://github.com/zylos-ai/zylos-imessage

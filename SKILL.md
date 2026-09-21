@@ -1,6 +1,6 @@
 ---
 name: imessage
-version: 0.2.0
+version: 0.3.0
 description: >
   iMessage communication channel for Zylos agents, delivered through the Photon
   (Spectrum) cloud service. Use when sending or receiving iMessages through
