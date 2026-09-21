@@ -28,8 +28,9 @@ number belongs to Photon.
 > **Verification status.** Delivery to and from a **real device** is verified
 > (2026-09-21): an iMessage sent from an iPhone reached the daemon and bound the
 > owner, and a reply sent with `scripts/send.js` was accepted by Photon and
-> arrived on the device. The full pipeline is additionally covered by 103 unit
-> tests and an end-to-end run against a stubbed SDK.
+> arrived on the device. The pipeline is additionally covered by 112 module
+> tests and 9 integration tests that spawn the real daemon against a stubbed
+> SDK.
 >
 > One gap remains: inbound message *content* only reaches C4 once the component
 > is installed as a channel. Run from a working copy, C4 rejects the delivery
@@ -107,9 +108,15 @@ an explicit error rather than delivered as literal text.
 
 ## Security
 
-- Owner binding is **trust-on-first-use** and is not identity verification. The
-  first inbound DM binds that sender as owner and raises a loud C4 notice. Set
-  `owner.user_id` before first start to avoid the race.
+- **The owner is never inferred from inbound traffic.** The number is shared,
+  so "messaged first" proves nothing. Set `owner.user_id` in `config.json`
+  before first start — until it is set, every DM is dropped. Alternatively set
+  `pairing.code` (>= 8 chars, optional `expiresAt`, attempt-capped, single-use)
+  and bind by sending that code from the owner's device; the code itself is
+  never forwarded to C4.
+- **Message bodies, contact names and full phone numbers are never written to
+  the log.** Sender ids are masked to their last four characters. The daemon's
+  stdout goes to pm2's `out.log`, which has no retention policy.
 - Group chat is disabled by default; the free shared number has no group
   support.
 - `config.json` is tightened to 0600 at startup if it has been loosened.
@@ -117,7 +124,8 @@ an explicit error rather than delivered as literal text.
 ## Development
 
 ```bash
-npm test     # 103 tests, node:test, no network required
+npm test     # 121 tests, node:test, no network required
+             # 112 module tests + 9 integration tests that spawn src/index.js
 ```
 
 The Photon SDK is lazily imported behind a test seam, so the full suite runs

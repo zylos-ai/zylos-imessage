@@ -110,3 +110,80 @@ test('repairConfigPermissions tightens a world-readable config', () => {
 test('readEnvFile returns empty for a missing file', () => {
   assert.deepEqual(config.readEnvFile(path.join(HOME, 'nope.env')), {});
 });
+
+// --- hot reload -----------------------------------------------------------
+//
+// The bug these cover: watching the config *file* binds to an inode, and
+// saveConfig publishes via rename. The first atomic replace unlinks the
+// watched inode, so every save after it fired nothing.
+
+/** Resolve once `onChange` has fired, or reject after `timeoutMs`. */
+function nextReload(timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('config reload did not fire')), timeoutMs);
+    pendingReload = (cfg) => { clearTimeout(timer); resolve(cfg); };
+  });
+}
+
+let pendingReload = null;
+
+test('config reload fires on every atomic replace, not just the first', async () => {
+  writeConfig(HOME, { dmPolicy: 'owner' });
+  config.resetConfigCache();
+  config.loadConfig();
+  config.watchConfig((cfg) => { if (pendingReload) { const fn = pendingReload; pendingReload = null; fn(cfg); } });
+
+  try {
+    // Three consecutive rename-based saves. The pre-fix watcher saw only #1.
+    for (const policy of ['open', 'allowlist', 'owner']) {
+      const waiter = nextReload();
+      const cfg = { ...config.getConfig(), dmPolicy: policy };
+      assert.equal(config.saveConfig(cfg), true);
+      const reloaded = await waiter;
+      assert.equal(reloaded.dmPolicy, policy, `save to "${policy}" must reach the daemon`);
+    }
+
+    // An in-place append (what a plain editor without atomic-save does) too.
+    const waiter = nextReload();
+    const onDisk = JSON.parse(fs.readFileSync(config.CONFIG_PATH, 'utf8'));
+    onDisk.dmPolicy = 'open';
+    fs.writeFileSync(config.CONFIG_PATH, JSON.stringify(onDisk, null, 2));
+    assert.equal((await waiter).dmPolicy, 'open');
+  } finally {
+    config.stopWatching();
+    pendingReload = null;
+  }
+});
+
+test('a corrupt write during reload leaves the last good config in place', async () => {
+  writeConfig(HOME, { dmPolicy: 'allowlist' });
+  config.resetConfigCache();
+  config.loadConfig();
+  config.watchConfig((cfg) => { if (pendingReload) { const fn = pendingReload; pendingReload = null; fn(cfg); } });
+
+  try {
+    const waiter = nextReload();
+    fs.writeFileSync(config.CONFIG_PATH, '{ not json');
+    // The watcher must still fire (and not throw); loadConfig falls back to
+    // defaults for an unparseable file rather than leaving a half-read state.
+    const reloaded = await waiter;
+    assert.equal(reloaded.enabled, true);
+    assert.equal(reloaded.dmPolicy, 'owner', 'falls back to the safe default');
+  } finally {
+    config.stopWatching();
+    pendingReload = null;
+  }
+});
+
+test('stopWatching ends delivery', async () => {
+  writeConfig(HOME, { dmPolicy: 'owner' });
+  config.resetConfigCache();
+  config.loadConfig();
+  let fired = 0;
+  config.watchConfig(() => { fired += 1; });
+  config.stopWatching();
+
+  config.saveConfig({ ...config.getConfig(), dmPolicy: 'open' });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(fired, 0);
+});

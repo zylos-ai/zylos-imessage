@@ -29,6 +29,9 @@ export function saveSpaces(spaces, filePath = SPACES_PATH) {
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(tmpPath, JSON.stringify(spaces, null, 2) + '\n', { mode: 0o600 });
+    // writeFileSync's mode is ignored when the temp file already exists, and
+    // this file holds contact ids and names. Set it before the rename.
+    fs.chmodSync(tmpPath, 0o600);
     fs.renameSync(tmpPath, filePath);
     return true;
   } catch (err) {

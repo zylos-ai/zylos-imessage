@@ -13,11 +13,12 @@ import {
   getConfig, loadConfig, watchConfig, stopWatching,
   hasCredentials, repairConfigPermissions, DATA_DIR, CONFIG_PATH
 } from './lib/config.js';
-import { authorizeInbound, hasOwner } from './lib/auth.js';
+import { authorizeInbound, hasOwner, pairingState } from './lib/auth.js';
 import { createC4Sender } from './lib/c4.js';
 import { createDeduper, createRateLimiter } from './lib/dedupe.js';
 import { buildEndpoint } from './lib/endpoint.js';
 import { startIpcServer, closeIpcServer, SOCKET_PATH } from './lib/ipc.js';
+import { redactId, redactSender } from './lib/redact.js';
 import { loadSpaces, saveSpaces, recordSpace } from './lib/spaces.js';
 import {
   createSpectrumClient, extractText, describeNonText, describeSpace, describeSender
@@ -39,6 +40,20 @@ if (!hasCredentials(config)) {
   console.error(`[imessage] Set projectId/projectSecret in ${CONFIG_PATH},`);
   console.error('[imessage] or IMESSAGE_PROJECT_ID / IMESSAGE_PROJECT_SECRET in ~/zylos/.env');
   process.exit(1);
+}
+
+// An owner is never inferred from traffic, so an unconfigured owner means
+// every DM is dropped. That is the safe failure, but it is silent — say so at
+// startup rather than letting an operator wonder why nothing arrives.
+if (!hasOwner(config)) {
+  const pairing = pairingState(config);
+  if (pairing.usable) {
+    console.warn('[imessage] No owner bound. A DM whose text matches the pairing code will bind it.');
+  } else {
+    console.warn(`[imessage] No owner bound and no usable pairing code (${pairing.reason}).`);
+    console.warn(`[imessage] ALL direct messages will be dropped. Set "owner.user_id" in ${CONFIG_PATH},`);
+    console.warn('[imessage] or set "pairing.code" there to bind the owner over iMessage.');
+  }
 }
 
 // ============================================================
@@ -97,37 +112,55 @@ function handleInbound(rawSpace, message) {
 
   const dedupeKey = message?.id ? `${space.id}:${message.id}` : null;
   if (dedupeKey && deduper.isDuplicate(dedupeKey)) {
-    console.log(`[imessage] Duplicate message ignored: ${dedupeKey}`);
+    console.log(`[imessage] Duplicate message ignored in space ${redactId(space.id)}`);
     return;
   }
 
   const sender = describeSender(message, rawSpace);
-  const hadOwner = hasOwner(config);
-  const decision = authorizeInbound(config, {
-    spaceId: space.id,
-    spaceType: space.type,
-    senderId: sender.id,
-    senderName: sender.name
-  });
 
-  if (!decision.allowed) {
-    console.log(`[imessage] Dropped message from ${sender.id || 'unknown'}: ${decision.reason}`);
-    return;
-  }
-
+  // The rate limiter runs before authorization so that unauthorized traffic —
+  // including pairing-code guesses — is bounded too, not just accepted traffic.
   if (!rateLimiter.allow(space.id)) {
     // One warning per space per window; the limiter itself does the dropping.
     if (!rateLimitNotified.has(space.id)) {
       rateLimitNotified.add(space.id);
-      console.warn(`[imessage] Rate limit hit for space ${space.id}; dropping messages`);
+      console.warn(`[imessage] Rate limit hit for space ${redactId(space.id)}; dropping messages`);
       setTimeout(() => rateLimitNotified.delete(space.id), config.rateLimit?.windowMs || 60000).unref?.();
     }
     return;
   }
 
+  const text = extractText(message);
+  const body = text || describeNonText(message);
+
+  // Authorization needs the text, because the one in-band way to become the
+  // owner is to present the pairing code as the message body.
+  const decision = authorizeInbound(config, {
+    spaceId: space.id,
+    spaceType: space.type,
+    senderId: sender.id,
+    senderName: sender.name,
+    text
+  });
+
+  if (decision.boundOwner) {
+    // Pairing succeeded. The body was the secret, so it is consumed here and
+    // never forwarded. Announce the binding out of band instead.
+    const notice =
+      `[imessage] Owner bound to ${redactSender(sender)} via pairing code. ` +
+      `The code has been consumed; rebinding requires editing "owner" in ${CONFIG_PATH}.`;
+    console.warn(notice);
+    sendToC4('admin|type:owner-binding', notice, { priority: 2, noReply: true });
+    return;
+  }
+
+  if (!decision.allowed) {
+    console.log(`[imessage] Dropped message from ${redactSender(sender)}: ${decision.reason}`);
+    return;
+  }
+
   noteSpace(space, sender);
 
-  const body = extractText(message) || describeNonText(message);
   if (!body) {
     console.log('[imessage] Ignoring message with no renderable content');
     return;
@@ -140,17 +173,6 @@ function handleInbound(rawSpace, message) {
     : `[iMessage] ${senderLabel} said: ${body}`;
 
   sendToC4(endpoint, content);
-
-  // Trust-on-first-use just happened. Say so loudly and out of band: the
-  // binding is not identity-verified, and the operator needs to know.
-  if (decision.boundOwner && !hadOwner) {
-    const notice =
-      `[imessage] Owner auto-bound to ${senderLabel} on first inbound DM ` +
-      '(trust-on-first-use — NOT identity-verified). Confirm this is the intended ' +
-      `owner, or correct "owner" in ${CONFIG_PATH}.`;
-    console.warn(notice);
-    sendToC4('admin|type:owner-binding', notice, { priority: 2, noReply: true });
-  }
 
   // Best effort read receipt; never let it break the inbound path.
   Promise.resolve().then(() => message?.read?.()).catch(() => {});

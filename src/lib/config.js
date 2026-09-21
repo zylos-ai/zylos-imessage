@@ -24,8 +24,13 @@ export const DEFAULT_CONFIG = {
   projectId: null,
   projectSecret: null,
 
-  // Access control
+  // Access control. The owner is never inferred from inbound traffic: either
+  // user_id is set here, or a sender proves possession of pairing.code.
   owner: { user_id: null, name: null, bound_at: null },
+  // One-time binding over iMessage. `code` must be >= 8 chars to be accepted,
+  // is consumed on first successful use, and is optional — leaving it null
+  // means the owner can only be bound by editing this file.
+  pairing: { code: null, expiresAt: null, maxAttempts: 5 },
   dmPolicy: 'owner',        // 'owner' | 'allowlist' | 'open'
   dmAllowFrom: [],
   // Photon's free shared number has no group chat; keep groups off by default.
@@ -53,6 +58,7 @@ const ENV_KEYS = {
 
 let config = null;
 let configWatcher = null;
+let watchDebounce = null;
 
 /**
  * Minimal `.env` reader. Only used as a credential fallback, so it handles the
@@ -88,7 +94,7 @@ function mergeDefaults(base, overrides) {
   const merged = { ...base, ...overrides };
   // One level of deep-merge is enough for our shape; it keeps a partially
   // written config.json from wiping out defaults for sibling keys.
-  for (const key of ['owner', 'message', 'dedupe', 'rateLimit', 'reconnect', 'ipc']) {
+  for (const key of ['owner', 'pairing', 'message', 'dedupe', 'rateLimit', 'reconnect', 'ipc']) {
     merged[key] = { ...base[key], ...(overrides?.[key] || {}) };
   }
   return merged;
@@ -186,18 +192,50 @@ export function saveConfig(newConfig) {
   }
 }
 
-export function watchConfig(onChange) {
-  if (configWatcher) {
-    configWatcher.close();
-    configWatcher = null;
-  }
-  if (!fs.existsSync(CONFIG_PATH)) return;
-  try {
-    configWatcher = fs.watch(CONFIG_PATH, (eventType) => {
-      if (eventType !== 'change') return;
-      console.log('[imessage] Config file changed, reloading...');
+/**
+ * Watch config.json for changes.
+ *
+ * Watching the *file* does not work here. saveConfig() — and every editor
+ * worth using — publishes changes by writing a temp file and renaming it over
+ * the target. After the first such replace, the watch is still bound to the
+ * old, now-unlinked inode, so every later save fires nothing. Measured
+ * behaviour of the file-watch version: first save 1 event, every save after
+ * that 0.
+ *
+ * So watch the *directory* and filter by filename instead. That survives
+ * atomic replacement, and also catches the config file being created after
+ * the daemon started, which the old `existsSync` guard silently skipped.
+ *
+ * Renames arrive as two events in quick succession on some platforms, so
+ * reloads are debounced; a reload that throws must not kill the watcher.
+ */
+export function watchConfig(onChange, { debounceMs = 50 } = {}) {
+  stopWatching();
+
+  const targetName = path.basename(CONFIG_PATH);
+
+  const reload = () => {
+    watchDebounce = null;
+    // A rename can briefly leave nothing at the path; loadConfig() already
+    // falls back to defaults, which is not what a transient gap should mean.
+    if (!fs.existsSync(CONFIG_PATH)) return;
+    try {
       loadConfig();
+      console.log('[imessage] Config file changed, reloading...');
       if (onChange) onChange(config);
+    } catch (err) {
+      console.error(`[imessage] Config reload failed: ${err.message}`);
+    }
+  };
+
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    configWatcher = fs.watch(DATA_DIR, (eventType, filename) => {
+      // filename can be null on some platforms; treat that as "might be ours".
+      if (filename && filename !== targetName) return;
+      if (watchDebounce) clearTimeout(watchDebounce);
+      watchDebounce = setTimeout(reload, debounceMs);
+      watchDebounce.unref?.();
     });
     configWatcher.on('error', () => { configWatcher = null; });
   } catch {
@@ -206,6 +244,10 @@ export function watchConfig(onChange) {
 }
 
 export function stopWatching() {
+  if (watchDebounce) {
+    clearTimeout(watchDebounce);
+    watchDebounce = null;
+  }
   if (configWatcher) {
     configWatcher.close();
     configWatcher = null;

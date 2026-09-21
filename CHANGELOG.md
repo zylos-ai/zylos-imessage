@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Addresses the five findings from the independent review of PR #1.
+
+### Security
+- **Breaking: the owner is no longer bound trust-on-first-use.** Previously the
+  first inbound DM bound that sender as owner and was delivered, with an
+  after-the-fact notice as the only safeguard — on a shared number that let a
+  stranger take the owner slot. The owner must now be pre-configured
+  (`owner.user_id`), or bound by presenting a `pairing.code` shared out of
+  band (>= 8 chars, optional expiry, constant-time compare, attempt-capped,
+  single-use, and never forwarded to C4). Until an owner exists, every DM is
+  dropped; the daemon warns at startup so this is not mistaken for an outage.
+- **Message bodies, contact names and full phone numbers are no longer
+  logged.** Ids are masked to their last four characters via a new
+  `src/lib/redact.js`. This also fixes a worse, previously unreported leak:
+  `execFile`'s failure message embeds the full command line, whose last
+  argument is `--content <entire body>`, so any C4 transport error wrote the
+  complete message to `out.log`.
+- `spaces.json` is now chmod'ed after write, not only on create.
+
+### Fixed
+- Config hot reload survives atomic replacement. The watcher followed the
+  config *file*, so the first rename-based save unlinked the watched inode and
+  every later save fired nothing (measured: 1 event across 3 saves). It now
+  watches the directory and filters by filename (3 of 3), and also picks up a
+  config file created after startup.
+
+### Added
+- 9 integration tests that spawn the real `src/index.js` — previously nothing
+  under `test/` loaded the entry point, so the inbound gate, self-send
+  suppression, reconnect and shutdown paths were never executed by the suite.
+  Covers stranger rejection, no-owner refusal, pairing, outbound-echo
+  suppression, dropped-stream and failed-connect recovery, SIGTERM cleanup,
+  and a no-PII-in-logs assertion. Verified to fail against the pre-fix commit.
+
+### Documentation
+- Corrected the dependency assessment. 2.11.0 is **past** the fix line for
+  GHSA-8988-4f7v-96qf (affects `@opentelemetry/core` < 2.8.0); the previous
+  claim that no fix existed and an override was impossible was wrong. Residual
+  exposure is six nested 2.7.1 copies behind the OTLP exporter chain. Measured
+  with a loader hook: with `telemetry: false`, only the patched 2.11.0 copy is
+  loaded and none of the 2.7.1 copies are. The limits of that measurement are
+  now stated rather than generalized into an unqualified "not reachable".
+- Removed the claim of end-to-end coverage the suite did not have, and
+  reconciled the contradictory real-device / inbound-content statements.
+
 ## [0.2.0] - 2026-09-21
 
 First working implementation. The 0.1.0 scaffold did not move messages.
@@ -19,7 +66,7 @@ First working implementation. The 0.1.0 scaffold did not move messages.
 - Connection supervisor with exponential backoff reconnect
 - Credential resolution from `config.json`, `process.env`, or `~/zylos/.env`,
   accepting Photon's own `SPECTRUM_*` names as a fallback
-- 103 tests (`node:test`), runnable without the SDK installed
+- 121 tests (`node:test`), runnable without the SDK installed
 
 ### Fixed
 - **Endpoint encoding corrupted every real Photon space id, so no reply could

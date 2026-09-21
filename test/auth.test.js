@@ -58,15 +58,99 @@ test('group sender allowlist gates non-owners but never the owner', () => {
   assert.equal(auth.isGroupSenderAllowed(cfg, 'g1', 'u3'), true);
 });
 
-test('authorizeInbound binds the first DM sender as owner and persists it', () => {
+test('a stranger cannot become owner just by messaging first', () => {
   const cfg = freshConfig();
   const result = auth.authorizeInbound(cfg, {
-    spaceId: 's1', spaceType: 'dm', senderId: '+6512345678', senderName: 'Bobo'
+    spaceId: 's1', spaceType: 'dm', senderId: '+15555550100', senderName: 'Stranger', text: 'hello'
   });
-  assert.equal(result.allowed, true);
+  assert.equal(result.allowed, false, 'must not be delivered');
+  assert.ok(!result.boundOwner, 'must not bind');
+  assert.equal(auth.hasOwner(cfg), false);
+  assert.match(result.reason, /owner not configured/);
+});
+
+test('with no owner and no pairing code, every DM is dropped', () => {
+  const cfg = freshConfig({ pairing: { code: null } });
+  for (const text of ['hi', '', 'password', 'ZYLOS-123456']) {
+    const result = auth.authorizeInbound(cfg, {
+      spaceId: 's1', spaceType: 'dm', senderId: '+15555550100', text
+    });
+    assert.equal(result.allowed, false);
+    assert.equal(auth.hasOwner(cfg), false);
+  }
+});
+
+test('a pairing code that is too short is refused outright', () => {
+  const cfg = freshConfig({ pairing: { code: 'short' } });
+  assert.equal(auth.pairingState(cfg).usable, false);
+  const result = auth.authorizeInbound(cfg, {
+    spaceId: 's1', spaceType: 'dm', senderId: '+15555550100', text: 'short'
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(auth.hasOwner(cfg), false, 'a weak code must never bind an owner');
+});
+
+test('an expired pairing code cannot bind', () => {
+  const cfg = freshConfig({
+    pairing: { code: 'PAIR-12345678', expiresAt: '2000-01-01T00:00:00.000Z' }
+  });
+  const result = auth.authorizeInbound(cfg, {
+    spaceId: 's1', spaceType: 'dm', senderId: '+15555550100', text: 'PAIR-12345678'
+  });
+  assert.equal(result.allowed, false);
+  assert.match(result.reason, /expired/);
+  assert.equal(auth.hasOwner(cfg), false);
+});
+
+test('the correct pairing code binds the owner but withholds the message', () => {
+  auth.resetPairingAttempts();
+  const cfg = freshConfig({ pairing: { code: 'PAIR-12345678', maxAttempts: 5 } });
+  const result = auth.authorizeInbound(cfg, {
+    spaceId: 's1', spaceType: 'dm', senderId: '+15555550100', senderName: 'Bobo',
+    text: '  PAIR-12345678  '
+  });
+
   assert.equal(result.boundOwner, true);
-  assert.equal(cfg.owner.user_id, '+6512345678');
-  assert.equal(readConfig(HOME).owner.user_id, '+6512345678', 'binding must survive a restart');
+  assert.equal(result.allowed, false, 'the body is the secret and must not be forwarded');
+  assert.equal(cfg.owner.user_id, '+15555550100');
+
+  const onDisk = readConfig(HOME);
+  assert.equal(onDisk.owner.user_id, '+15555550100', 'binding must survive a restart');
+  assert.equal(onDisk.pairing.code, null, 'the code must be consumed by the same write');
+});
+
+test('a consumed pairing code cannot be replayed to rebind someone else', () => {
+  auth.resetPairingAttempts();
+  const cfg = freshConfig({ pairing: { code: 'PAIR-12345678', maxAttempts: 5 } });
+  assert.equal(auth.authorizeInbound(cfg, {
+    spaceId: 's1', spaceType: 'dm', senderId: 'first', text: 'PAIR-12345678'
+  }).boundOwner, true);
+
+  const replay = auth.authorizeInbound(cfg, {
+    spaceId: 's2', spaceType: 'dm', senderId: 'attacker', text: 'PAIR-12345678'
+  });
+  assert.equal(replay.allowed, false);
+  assert.ok(!replay.boundOwner);
+  assert.equal(cfg.owner.user_id, 'first', 'owner must be unchanged');
+});
+
+test('pairing attempts are capped', () => {
+  auth.resetPairingAttempts();
+  const cfg = freshConfig({ pairing: { code: 'PAIR-12345678', maxAttempts: 3 } });
+  for (let i = 0; i < 3; i += 1) {
+    assert.equal(auth.authorizeInbound(cfg, {
+      spaceId: 's1', spaceType: 'dm', senderId: 'attacker', text: `guess-${i}`
+    }).allowed, false);
+  }
+  assert.equal(auth.getPairingAttempts(), 3);
+  // Budget spent: even the right code is refused now.
+  const result = auth.authorizeInbound(cfg, {
+    spaceId: 's1', spaceType: 'dm', senderId: 'attacker', text: 'PAIR-12345678'
+  });
+  assert.equal(result.allowed, false);
+  assert.match(result.reason, /too many failed pairing attempts/);
+  assert.equal(auth.hasOwner(cfg), false);
+  auth.resetPairingAttempts();
 });
 
 test('authorizeInbound rejects a second sender once an owner exists', () => {

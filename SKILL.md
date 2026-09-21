@@ -121,13 +121,21 @@ Environment-sourced credentials are deliberately **not** written back to
 | `dedupe.ttlMs` | `300000` | Replay window for repeated message ids |
 | `rateLimit.max` | `60` | Inbound messages per space per window |
 
-### Owner binding is trust-on-first-use
+### Owner binding requires pre-configuration or a pairing code
 
-With no owner set, the first inbound DM binds that sender as owner. This is
-**not** identity verification — anyone who messages the number first becomes
-owner. The binding raises a loud `admin|type:owner-binding` C4 notice so it can
-be checked. To avoid the race entirely, set `owner.user_id` in `config.json`
-before starting.
+The owner is never inferred from inbound traffic — the Photon number is
+shared, so "messaged first" is not an identity claim. **Until an owner is
+set, every DM is dropped** (the daemon warns about this at startup, so it is
+not mistaken for an outage). Two ways to bind:
+
+- Set `owner.user_id` in `config.json` before starting — the default.
+- Set `pairing.code` to a secret shared out of band, then send exactly that
+  text from the owner's device. The code must be >= 8 characters, supports an
+  optional `pairing.expiresAt`, is capped at `pairing.maxAttempts` failures
+  (default 5), and is consumed on first success so it cannot be replayed. The
+  message carrying the code is never forwarded to C4.
+
+Either way the binding raises an `admin|type:owner-binding` C4 notice.
 
 ## Sending
 

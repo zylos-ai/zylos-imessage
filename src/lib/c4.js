@@ -9,12 +9,28 @@
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 
+import { redactEndpoint } from './redact.js';
+
 export const C4_RECEIVE = path.join(
   process.env.HOME,
   'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js'
 );
 
 const EXEC_OPTS = { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 };
+
+/**
+ * execFile's failure message is `Command failed: <file> <args...>`, and our
+ * args end with `--content <the entire message body>`. Logging it raw would
+ * put the full body in out.log — worse than the 60-char excerpt this file
+ * used to print. Everything from `--content` on is dropped.
+ */
+export function sanitizeExecError(error) {
+  const message = error?.message ? String(error.message) : 'unknown error';
+  const cut = message.indexOf('--content');
+  const head = cut === -1 ? message : `${message.slice(0, cut)}--content <redacted>`;
+  // stderr is appended after the command line; keep its tail, minus any body.
+  return head.split('\n')[0].trim();
+}
 
 export function parseC4Response(stdout) {
   if (!stdout) return null;
@@ -42,7 +58,10 @@ export function createC4Sender({ isStopped = () => false, retryTimers = new Set(
 
     exec(process.execPath, args, EXEC_OPTS, (error, stdout) => {
       if (!error) {
-        console.log(`[imessage] -> C4: ${content.slice(0, 60).replace(/\n/g, ' ')}`);
+        // Never log the body. See src/lib/redact.js: out.log has no retention
+        // policy, and an excerpt of a private message is still a private
+        // message. Size and destination are what a delivery problem needs.
+        console.log(`[imessage] -> C4: delivered to ${redactEndpoint(endpoint)} (${content.length} chars)`);
         return;
       }
 
@@ -55,7 +74,7 @@ export function createC4Sender({ isStopped = () => false, retryTimers = new Set(
       }
 
       if (isStopped()) return;
-      console.warn(`[imessage] C4 delivery failed, retrying in ${retryDelayMs}ms: ${error.message}`);
+      console.warn(`[imessage] C4 delivery failed, retrying in ${retryDelayMs}ms: ${sanitizeExecError(error)}`);
 
       const timer = setTimeout(() => {
         retryTimers.delete(timer);
@@ -67,7 +86,7 @@ export function createC4Sender({ isStopped = () => false, retryTimers = new Set(
             if (onReject) onReject(retryResponse.error?.message || 'rejected');
             return;
           }
-          console.error(`[imessage] C4 delivery failed after retry: ${retryError.message}`);
+          console.error(`[imessage] C4 delivery failed after retry: ${sanitizeExecError(retryError)}`);
           if (onFail) onFail(retryError);
         });
       }, retryDelayMs);
